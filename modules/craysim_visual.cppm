@@ -1605,8 +1605,6 @@ export namespace craysim
             return _agent;
         }
 
-        static constexpr bool debug_collisions = false;
-
         // Compare Bounding boxes for each model and our agent model
         std::int32_t test_agent_bounding_box_intersections (const sm::mat<float, 4>& agent_body_viewmatrix)
         {
@@ -1621,13 +1619,21 @@ export namespace craysim
             this->init_vm_accessor();
             mplot::VisualModel<glver>* mdl = this->get_next_vm_accessor();
             while (mdl) {
+                // The EyeVisual model(s) in this->eyes follow the agent's own compound-eye
+                // camera and never get a real bounding box computed (it stays at its initial
+                // FLT_MAX/-FLT_MAX sentinel), which otherwise registers as an instant collision
+                // in every direction. They're agent-attached visualisation props, not obstacles.
+                bool is_own_eye = false;
+                for (auto& eye_kv : this->eyes) { if (eye_kv.second == mdl) { is_own_eye = true; break; } }
+
                 if (mdl != this->land
                     && mdl->name != "vegetation_inner_alternative" // hack to work in Seville environment
                     && mdl != isvp // breadcrumbs
                     && mdl != cvisvp // collision visualization
                     && mdl != _agent
                     && mdl != this->agent_coords
-                    && mdl != this->compass_coords) {
+                    && mdl != this->compass_coords
+                    && !is_own_eye) {
 
                     // Get the model's oriented bounding box (the compute in here may be
                     // repeated many times and is acandidate for optimization)
@@ -1635,13 +1641,10 @@ export namespace craysim
                     // Do oriented bounding box collision detection
                     if (sm::geometry::obb_collision_detect (my_obb, obb)) {
                         auto model_id = static_cast<std::int32_t>(this->getVisualModelId (mdl));
-                        if constexpr (debug_collisions) {
-                            std::cout << "Collision for model " << mdl->name << " ID " << model_id << std::endl;
-                        }
                         return model_id;
                     }
 
-                } // else: std::cout << "Skipping " << mdl->name << std::endl;
+                } //else {std::cout << "Skipping " << mdl->name << std::endl; }
                 mdl = this->get_next_vm_accessor();
             }
 
@@ -1694,11 +1697,17 @@ export namespace craysim
             sm::vec<float, 3> agent_scale = _agent->getViewMatrix().scaling_vec();
             agent_sz *= agent_scale[0]; // Assume uniform scaling
 
+            // Spacing between successive sampled distances along a ray, in units of agent_sz. The
+            // overall search distance (agent_sz * up_to) is scaled by the same factor, so a ray
+            // still gets roughly @up_to samples, just spread @sample_spacing_mult times farther
+            // apart (and the total search radius grows by the same factor).
+            constexpr float sample_spacing_mult = 20.0f; // 10.0 * 1.3
+
             float search_distance = agent_sz;
-            float up_to_dist = agent_sz * up_to;
+            float up_to_dist = agent_sz * up_to * sample_spacing_mult;
 
             // Create a movement wrt our camera forwards direction z.
-            sm::vec<float> mv_camframe = {0, 0, agent_sz};
+            sm::vec<float> mv_camframe = {0, 0, agent_sz * sample_spacing_mult};
 
             while (!collided && search_distance < up_to_dist) {
 
@@ -2510,7 +2519,9 @@ export namespace craysim
                 } else if (key == mplot::key::space) {
                     this->vstate.flip (state::paused);
 
-                } else if (key == mplot::key::n0) {
+                } else if (key == mplot::key::n0 && !(mods & mplot::keymod::control)) {
+                    // Note: Ctrl+0 is reserved by the base class (VisualOwnable) for adjusting
+                    // diffuse_intensity, so this collision-viz toggle only responds to bare "0".
                     sim_opts.flip (craysim::options::visualize_collisions);
                     sim_opts.set (craysim::options::find_collisions, sim_opts.test (craysim::options::visualize_collisions));
                     if (this->sim_opts.test (craysim::options::visualize_collisions) == false && this->cvisvp != nullptr) {
